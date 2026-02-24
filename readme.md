@@ -35,6 +35,7 @@ console.log(result.safeText);
 
 
 ## File Structure
+```bash
 llm-guardrails/
 ├─ package.json
 ├─ tsconfig.json
@@ -57,3 +58,4 @@ llm-guardrails/
 │     └─ openai.ts
 └─ test/
    └─ guardrails.spec.ts
+```
