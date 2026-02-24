@@ -46,14 +46,22 @@ export type GuardrailsConfig = {
 
   //pii options
   piiOptions?: Record<string, any>;
+  
+  // for flow of the function
+  checkInputOnly?: boolean; // if true, only check input and skip output checks (for future use)
+  checkOutputOnly?: boolean; // if true, only check output and skip input checks (for future use)
 };
 
 export type GuardrailsRunInput = {
   userMessage: string;
   context?: string; // optional RAG context
-  llm: LLMCaller;
+  llm?: LLMCaller;
   // optional extra messages (e.g. developer instruction)
   preMessages?: LLMMessage[];
+  output?: string; // for "json" outputMode: the raw output from LLM (if already obtained outside guard, e.g. via streaming) - if not provided, guard will call llm to get it (required for "text" mode),
+  // for flow of the function
+  checkInputOnly?: boolean; // if true, only check input and skip output checks (for future use)
+  checkOutputOnly?: boolean; // if true, only check output and skip input checks (for future use)
 };
 
 export type GuardrailsRunResult = {
@@ -62,6 +70,8 @@ export type GuardrailsRunResult = {
   events: GuardEvent[];
   // debugging (never show to end user in prod):
   rawModelText?: string;
+  outputDetections?: any[]; // from output detectors, for debugging
+  inputDetections?: any[]; // from input detectors, for debugging
 };
 
 export type Guardrails = {
