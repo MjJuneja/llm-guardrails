@@ -1,4 +1,4 @@
-# @your-scope/llm-guardrails
+# @mjjuneja/llm-guardrails
 
 A small middleware that sanitizes LLM inputs/outputs to reduce leakage of:
 - PII
@@ -7,11 +7,11 @@ A small middleware that sanitizes LLM inputs/outputs to reduce leakage of:
 - system/developer prompt text
 
 ## Install
-npm i @your-scope/llm-guardrails
+npm i @mjjuneja/llm-guardrails
 
 ## Usage (generic)
 ```ts
-import { createGuardrails } from "@your-scope/llm-guardrails";
+import { createGuardrails } from "@mjjuneja/llm-guardrails";
 
 const guard = createGuardrails({
   redactPII: true,
