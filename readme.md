@@ -84,7 +84,7 @@ Sanitizes input before calling any LLM.
 const guard = createGuardrails({ mode: "input_only" });
 
 const result = await guard.run({
-  userMessage: "Email me at mukul@muol.com"
+  userMessage: "Email me at dummy@dummy.com"
 });
 
 console.log(result.safeText); // email redacted
