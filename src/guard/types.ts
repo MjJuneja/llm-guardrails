@@ -8,9 +8,13 @@ export type LLMMessage = {
 export type LLMCaller = (messages: LLMMessage[]) => Promise<string>;
 
 export type GuardAction = "ALLOW" | "REDACT" | "BLOCK" | "REWRITE";
+export type GuardPhase = "input" | "output" | "tool";
+export type Severity = "low" | "medium" | "high" | "critical";
 
 export type GuardEvent = {
   ts: string;
+  requestId: string;
+  phase: GuardPhase;
   kind:
     | "INPUT_REDACTED"
     | "INPUT_BLOCKED"
@@ -18,13 +22,53 @@ export type GuardEvent = {
     | "OUTPUT_BLOCKED"
     | "OUTPUT_REWRITE_ATTEMPT"
     | "OUTPUT_REWRITE_SUCCESS"
-    | "OUTPUT_REWRITE_FAILED";
+    | "OUTPUT_REWRITE_FAILED"
+    | "OUTPUT_JSON_INVALID"
+    | "TOOL_CALL_BLOCKED"
+    | "TOOL_RESULT_REDACTED";
   detector: string;
-  matches?: string[];
+  severity?: Severity;
+  matches?: string[]; // ideally hashed when redactEventPayloads=true
   meta?: Record<string, unknown>;
 };
 
+export type OutputJsonValidatorResult =
+  | { ok: true; value: any }
+  | { ok: false; error: string };
+
+export type OutputJsonValidator = (text: string) => OutputJsonValidatorResult;
+
+export type ToolCall = {
+  name: string;
+  args: unknown;
+};
+
+export type ToolCallDecision =
+  | { allowed: true; reason?: string }
+  | { allowed: false; reason: string };
+
+export type ToolPolicy = {
+  // block tool entirely
+  block?: boolean;
+
+  // allow/deny rules for args (optional)
+  validateCall?: (call: ToolCall) => ToolCallDecision;
+
+  // output shaping
+  maxChars?: number;
+  maxRows?: number;
+
+  // remove fields from array-of-objects results
+  stripFields?: string[];
+
+  // run guardrails output sanitization on tool result text
+  sanitizeText?: boolean;
+};
+
 export type GuardrailsConfig = {
+  // new vNext mode
+  mode?: "full" | "input_only" | "output_only";
+
   // toggles
   redactPII?: boolean;
   redactSecrets?: boolean;
@@ -33,47 +77,79 @@ export type GuardrailsConfig = {
 
   // behavior
   maxRewriteAttempts?: number; // default 1
-  outputMode?: "text" | "json"; // v1 uses text; json mode just enforces "no leak tokens" stricter
-
-  // optional: add your own system guard prompt
+  outputMode?: "text" | "json";
   systemGuardPrompt?: string;
 
-  // audit hook
-  onEvent?: (e: GuardEvent) => void;
+  // for json mode
+  outputJsonValidator?: OutputJsonValidator;
 
-  // allowlist patterns (advanced)
+  // audit
+  onEvent?: (e: GuardEvent) => void;
+  emitOnAllow?: boolean; // if true, emits allow events (optional)
+  redactEventPayloads?: boolean; // if true, hash matches in events
+  requestIdFactory?: () => string;
+
+  // allowlist patterns
   allowPatterns?: RegExp[];
 
-  //pii options
+  // PII detector options (your new pii.ts supports it)
   piiOptions?: Record<string, any>;
-  
-  // for flow of the function
-  checkInputOnly?: boolean; // if true, only check input and skip output checks (for future use)
-  checkOutputOnly?: boolean; // if true, only check output and skip input checks (for future use)
+
+  // tool firewall
+  toolPolicies?: Record<string, ToolPolicy>;
+
+  // messages
+  blockMessage?: string;
 };
 
 export type GuardrailsRunInput = {
-  userMessage: string;
-  context?: string; // optional RAG context
-  llm?: LLMCaller;
-  // optional extra messages (e.g. developer instruction)
+  userMessage?: string; // not required for output_only
+  context?: string;
   preMessages?: LLMMessage[];
-  output?: string; // for "json" outputMode: the raw output from LLM (if already obtained outside guard, e.g. via streaming) - if not provided, guard will call llm to get it (required for "text" mode),
-  // for flow of the function
-  checkInputOnly?: boolean; // if true, only check input and skip output checks (for future use)
-  checkOutputOnly?: boolean; // if true, only check output and skip input checks (for future use)
+
+  // For full/input_only mode
+  llm?: LLMCaller;
+
+  // For output_only mode (or full-mode fallback)
+  output?: string;
+
+  // Optional ids for tracing
+  requestId?: string;
 };
 
 export type GuardrailsRunResult = {
   safeText: string;
   blocked: boolean;
   events: GuardEvent[];
-  // debugging (never show to end user in prod):
+
+  // optional debug: don’t log in prod
   rawModelText?: string;
-  outputDetections?: any[]; // from output detectors, for debugging
-  inputDetections?: any[]; // from input detectors, for debugging
+
+  // diagnostics (helpful for internal use)
+  inputDetections?: unknown;
+  outputDetections?: unknown;
+
+  // json mode convenience
+  json?: any;
+};
+
+export type ValidatePhaseResult = {
+  ok: boolean;
+  blocked: boolean;
+  sanitizedText: string;
+  events: GuardEvent[];
+  detections?: unknown;
+  json?: any;
 };
 
 export type Guardrails = {
   run(input: GuardrailsRunInput): Promise<GuardrailsRunResult>;
+
+  // vNext helpers
+  validateInput(text: string, requestId?: string): ValidatePhaseResult;
+  validateOutput(text: string, requestId?: string): ValidatePhaseResult;
+
+  // tool firewall helpers
+  validateToolCall(call: ToolCall, requestId?: string): ToolCallDecision;
+  sanitizeToolResult(toolName: string, payload: unknown, requestId?: string): { payload: unknown; events: GuardEvent[] };
 };

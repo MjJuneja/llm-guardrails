@@ -1,9 +1,9 @@
-import type { GuardAction } from "../guard/types.js";
+import type { GuardAction, Severity } from "../guard/types.js";
 
 export type Detection = {
   detector: string;
   matches: string[];
-  severity: "low" | "medium" | "high";
+  severity: Severity;
   // suggested default action by detector
   action: GuardAction;
 };
