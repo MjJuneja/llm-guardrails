@@ -182,6 +182,20 @@ const guard = createGuardrails({
 
 ------------------------------------------------------------------------
 
+## Security Model
+
+This package:
+
+- Does NOT perform any outbound network requests
+- Does NOT send telemetry
+- Does NOT load remote code
+- Does NOT access filesystem unless explicitly used in tool policies
+- Performs only in-memory text inspection and transformation
+
+All URL patterns in the source code are used strictly for validation and detection purposes.
+
+------------------------------------------------------------------------
+
 # License
 
 MIT
