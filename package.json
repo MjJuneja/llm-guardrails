@@ -2,11 +2,31 @@
   "name": "@mjjuneja/llm-guardrails",
   "version": "0.1.0",
   "description": "Middleware guardrails to reduce PII/secrets/SQL/schema/prompt leakage in LLM apps",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mjjuneja/llm-guardrails.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mjjuneja/llm-guardrails/issues"
+  },
+  "homepage": "https://github.com/mjjuneja/llm-guardrails#readme",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./adapters/openai": {
+      "types": "./dist/src/adapters/openai.d.ts",
+      "import": "./dist/src/adapters/openai.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.spec.js",
