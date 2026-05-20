@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-05-21
+
+### Changed
+
+- Packaging: the published tarball now ships only `dist/src` (the library),
+  not the compiled test suite. Removed two unreferenced dead files
+  (`detectors/test.ts` scratch demo and an unused `policies/toolPolicies.ts`
+  example). This eliminates test-fixture email domains and example allowlist
+  domains from the published code, which were tripping supply-chain scanners.
+  No runtime behaviour changed — the package makes no network requests.
+
 ## [0.3.0] - 2026-05-20
 
 First public release.
