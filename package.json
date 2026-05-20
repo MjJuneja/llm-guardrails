@@ -1,7 +1,7 @@
 {
   "name": "@mjjuneja/llm-guardrails",
-  "version": "0.1.4",
-  "description": "Middleware guardrails to reduce PII/secrets/SQL/schema/prompt leakage in LLM apps",
+  "version": "0.2.0",
+  "description": "Guardrail middleware for LLM apps — PII/secrets/SQL/prompt-leak protection, India DPDP enforcement (Aadhaar/PAN/GSTIN), child-signal detection, and a compliance audit trail",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mjjuneja/llm-guardrails.git"
@@ -40,7 +40,15 @@
     "security",
     "pii",
     "redaction",
-    "prompt-injection"
+    "prompt-injection",
+    "dpdp",
+    "llm-security",
+    "ai-safety",
+    "pii-detection",
+    "dpdp",
+    "data-protection",
+    "data-privacy",
+    "indian-compliance"
   ],
   "license": "MIT",
   "devDependencies": {
