@@ -13,6 +13,15 @@ function defaultInputPolicy(detections, cfg) {
         if (d.detector === "pii" && cfg.redactPII) {
             return { ...d, action: "REDACT", severity: "medium" };
         }
+        if (d.detector === "indianPii" && cfg.redactPII) {
+            const action = cfg.dpdpEnforce ? "BLOCK" : "REDACT";
+            return { ...d, action, severity: "high" };
+        }
+        if (d.detector === "childSignal") {
+            // Without enforcement a child signal only flags (event); with it, blocks.
+            const action = cfg.dpdpEnforce ? "BLOCK" : "ALLOW";
+            return { ...d, action, severity: "high" };
+        }
         return d;
     });
 }
@@ -30,6 +39,14 @@ function defaultOutputPolicy(detections, cfg) {
         }
         if (d.detector === "pii" && cfg.redactPII) {
             return { ...d, action: "REDACT", severity: "medium" };
+        }
+        if (d.detector === "indianPii" && cfg.redactPII) {
+            const action = cfg.dpdpEnforce ? "BLOCK" : "REDACT";
+            return { ...d, action, severity: "high" };
+        }
+        if (d.detector === "childSignal") {
+            const action = cfg.dpdpEnforce ? "BLOCK" : "ALLOW";
+            return { ...d, action, severity: "high" };
         }
         return d;
     });

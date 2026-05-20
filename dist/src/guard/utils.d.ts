@@ -8,4 +8,11 @@ export declare function applyRedactions(input: string, redactions: Array<{
     end: number;
     replacement: string;
 }>): string;
-export declare function passesAllowlist(text: string, allowPatterns?: RegExp[]): boolean;
+/**
+ * Drop detector matches that are themselves allowlisted.
+ *
+ * This is a per-match filter, not a whole-text bypass: an allowlisted token no
+ * longer disables scanning for the rest of the message. The global flag is
+ * stripped before `.test()` so matching is not stateful across calls.
+ */
+export declare function filterAllowlisted(matches: string[], allowPatterns?: RegExp[]): string[];

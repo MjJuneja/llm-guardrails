@@ -8,7 +8,7 @@ export type LLMMessage = {
 export type LLMCaller = (messages: LLMMessage[]) => Promise<string>;
 
 export type GuardAction = "ALLOW" | "REDACT" | "BLOCK" | "REWRITE";
-export type GuardPhase = "input" | "output" | "tool";
+export type GuardPhase = "input" | "output" | "tool" | "compliance";
 export type Severity = "low" | "medium" | "high" | "critical";
 
 export type GuardEvent = {
@@ -25,10 +25,36 @@ export type GuardEvent = {
     | "OUTPUT_REWRITE_FAILED"
     | "OUTPUT_JSON_INVALID"
     | "TOOL_CALL_BLOCKED"
-    | "TOOL_RESULT_REDACTED";
+    | "TOOL_RESULT_REDACTED"
+    // DPDP / India compliance
+    | "CHILD_SIGNAL_DETECTED"
+    | "DPDP_BLOCKED"
+    | "CONSENT_RECORDED"
+    | "EVIDENCE_RECORDED";
   detector: string;
   severity?: Severity;
   matches?: string[]; // ideally hashed when redactEventPayloads=true
+  meta?: Record<string, unknown>;
+};
+
+/**
+ * A consent record for the DPDP audit trail. Logged via `recordConsent`.
+ * `dataPrincipalId` is stored as-is in the event meta — pass a pseudonymous id
+ * if you do not want raw identifiers in your logs.
+ */
+export type ConsentRecord = {
+  dataPrincipalId: string;
+  purpose: string;
+  granted: boolean;
+  noticeVersion?: string;
+  meta?: Record<string, unknown>;
+};
+
+/** Evidence of a processing activity for the DPDP audit trail. */
+export type EvidenceRecord = {
+  action: string;
+  purpose: string;
+  dataPrincipalId?: string;
   meta?: Record<string, unknown>;
 };
 
@@ -74,6 +100,13 @@ export type GuardrailsConfig = {
   redactSecrets?: boolean;
   blockSQLLeakage?: boolean;
   blockPromptLeakage?: boolean;
+
+  // DPDP / India compliance
+  // detectChildSignals: heuristically flag content involving minors (default false)
+  detectChildSignals?: boolean;
+  // dpdpEnforce: escalate Indian PII + child signals to a hard BLOCK and throw
+  // DPDPBlockedError instead of redacting/flagging (default false)
+  dpdpEnforce?: boolean;
 
   // behavior
   maxRewriteAttempts?: number; // default 1
@@ -152,4 +185,8 @@ export type Guardrails = {
   // tool firewall helpers
   validateToolCall(call: ToolCall, requestId?: string): ToolCallDecision;
   sanitizeToolResult(toolName: string, payload: unknown, requestId?: string): { payload: unknown; events: GuardEvent[] };
+
+  // DPDP audit-trail helpers — emit a compliance event via onEvent and return it
+  recordConsent(record: ConsentRecord): GuardEvent;
+  recordEvidence(record: EvidenceRecord): GuardEvent;
 };

@@ -5,7 +5,7 @@ exports.emit = emit;
 exports.unique = unique;
 exports.clipMatches = clipMatches;
 exports.applyRedactions = applyRedactions;
-exports.passesAllowlist = passesAllowlist;
+exports.filterAllowlisted = filterAllowlisted;
 function nowIso() {
     return new Date().toISOString();
 }
@@ -31,8 +31,18 @@ function applyRedactions(input, redactions) {
     }
     return out;
 }
-function passesAllowlist(text, allowPatterns) {
+/**
+ * Drop detector matches that are themselves allowlisted.
+ *
+ * This is a per-match filter, not a whole-text bypass: an allowlisted token no
+ * longer disables scanning for the rest of the message. The global flag is
+ * stripped before `.test()` so matching is not stateful across calls.
+ */
+function filterAllowlisted(matches, allowPatterns) {
     if (!allowPatterns || allowPatterns.length === 0)
-        return false;
-    return allowPatterns.some((re) => re.test(text));
+        return matches;
+    return matches.filter((m) => !allowPatterns.some((re) => {
+        const r = re.global ? new RegExp(re.source, re.flags.replace("g", "")) : re;
+        return r.test(m);
+    }));
 }

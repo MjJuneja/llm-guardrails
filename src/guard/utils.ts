@@ -29,7 +29,20 @@ export function applyRedactions(input: string, redactions: Array<{ start: number
   return out;
 }
 
-export function passesAllowlist(text: string, allowPatterns?: RegExp[]) {
-  if (!allowPatterns || allowPatterns.length === 0) return false;
-  return allowPatterns.some((re) => re.test(text));
+/**
+ * Drop detector matches that are themselves allowlisted.
+ *
+ * This is a per-match filter, not a whole-text bypass: an allowlisted token no
+ * longer disables scanning for the rest of the message. The global flag is
+ * stripped before `.test()` so matching is not stateful across calls.
+ */
+export function filterAllowlisted(matches: string[], allowPatterns?: RegExp[]) {
+  if (!allowPatterns || allowPatterns.length === 0) return matches;
+  return matches.filter(
+    (m) =>
+      !allowPatterns.some((re) => {
+        const r = re.global ? new RegExp(re.source, re.flags.replace("g", "")) : re;
+        return r.test(m);
+      }),
+  );
 }

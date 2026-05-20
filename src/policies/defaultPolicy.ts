@@ -1,5 +1,5 @@
 import type { Detection } from "./actions.js";
-import type { GuardrailsConfig } from "../guard/types.js";
+import type { GuardrailsConfig, GuardAction } from "../guard/types.js";
 
 export function defaultInputPolicy(detections: Detection[], cfg: GuardrailsConfig) {
   // secrets in input => BLOCK
@@ -11,6 +11,15 @@ export function defaultInputPolicy(detections: Detection[], cfg: GuardrailsConfi
     }
     if (d.detector === "pii" && cfg.redactPII) {
       return { ...d, action: "REDACT" as const, severity: "medium" as const };
+    }
+    if (d.detector === "indianPii" && cfg.redactPII) {
+      const action: GuardAction = cfg.dpdpEnforce ? "BLOCK" : "REDACT";
+      return { ...d, action, severity: "high" as const };
+    }
+    if (d.detector === "childSignal") {
+      // Without enforcement a child signal only flags (event); with it, blocks.
+      const action: GuardAction = cfg.dpdpEnforce ? "BLOCK" : "ALLOW";
+      return { ...d, action, severity: "high" as const };
     }
     return d;
   });
@@ -30,6 +39,14 @@ export function defaultOutputPolicy(detections: Detection[], cfg: GuardrailsConf
     }
     if (d.detector === "pii" && cfg.redactPII) {
       return { ...d, action: "REDACT" as const, severity: "medium" as const };
+    }
+    if (d.detector === "indianPii" && cfg.redactPII) {
+      const action: GuardAction = cfg.dpdpEnforce ? "BLOCK" : "REDACT";
+      return { ...d, action, severity: "high" as const };
+    }
+    if (d.detector === "childSignal") {
+      const action: GuardAction = cfg.dpdpEnforce ? "BLOCK" : "ALLOW";
+      return { ...d, action, severity: "high" as const };
     }
     return d;
   });

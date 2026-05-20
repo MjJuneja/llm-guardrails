@@ -6,6 +6,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const node_test_1 = __importDefault(require("node:test"));
 const strict_1 = __importDefault(require("node:assert/strict"));
 const createGuardrails_js_1 = require("../src/guard/createGuardrails.js");
+const indianPii_js_1 = require("../src/detectors/indianPii.js");
+const childSignal_js_1 = require("../src/detectors/childSignal.js");
+const errors_js_1 = require("../src/guard/errors.js");
 (0, node_test_1.default)("mode=input_only sanitizes PII in input and does not call llm", async () => {
     const guard = (0, createGuardrails_js_1.createGuardrails)({
         mode: "input_only",
@@ -165,4 +168,212 @@ const createGuardrails_js_1 = require("../src/guard/createGuardrails.js");
     const arr = payload;
     strict_1.default.equal(arr.length, 1);
     strict_1.default.equal(arr[0].password, undefined);
+});
+// ---------------------------------------------------------------------------
+// Indian PII detectors (Aadhaar / PAN / GSTIN)
+// ---------------------------------------------------------------------------
+(0, node_test_1.default)("indianPii: Verhoeff checksum accepts valid and rejects invalid Aadhaar", () => {
+    strict_1.default.equal((0, indianPii_js_1.isValidAadhaar)("234567890124"), true);
+    strict_1.default.equal((0, indianPii_js_1.isValidAadhaar)("234567890123"), false);
+});
+(0, node_test_1.default)("indianPii: detector returns only checksum-valid Aadhaar numbers", () => {
+    const d = (0, indianPii_js_1.detectIndianPII)("good 234567890124 bad 234567890123");
+    const aadhaar = d.detectedItems.find((x) => x.type === "aadhaar");
+    strict_1.default.ok(aadhaar, "Expected an aadhaar detection");
+    strict_1.default.deepEqual(aadhaar.items, ["234567890124"]);
+});
+(0, node_test_1.default)("indianPii: detector finds PAN and a valid GSTIN", () => {
+    const d = (0, indianPii_js_1.detectIndianPII)("PAN ABCPK1234Z GSTIN 22AAAAA0000A1ZC");
+    strict_1.default.ok(d.detectedItems.find((x) => x.type === "pan"), "Expected PAN");
+    strict_1.default.ok(d.detectedItems.find((x) => x.type === "gstin"), "Expected GSTIN");
+});
+(0, node_test_1.default)("indianPii: valid Aadhaar is redacted in output", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "output_only",
+        redactPII: true,
+        redactEventPayloads: false,
+    });
+    const res = await guard.run({ output: "Your Aadhaar 234567890124 is on file." });
+    strict_1.default.equal(res.blocked, false);
+    strict_1.default.ok(res.safeText.includes("[Aadhaar removed]"));
+    strict_1.default.equal(res.safeText.includes("234567890124"), false);
+});
+(0, node_test_1.default)("indianPii: number with bad Aadhaar checksum is not labelled Aadhaar", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "output_only",
+        redactPII: true,
+        redactEventPayloads: false,
+    });
+    const res = await guard.run({ output: "Reference number 234567890123 here." });
+    strict_1.default.equal(res.safeText.includes("[Aadhaar removed]"), false);
+});
+// ---------------------------------------------------------------------------
+// Bug fix: secrets regex no longer matches bare keywords
+// ---------------------------------------------------------------------------
+(0, node_test_1.default)("secrets: a plain sentence containing 'password' does not block input", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "input_only",
+        redactSecrets: true,
+        redactEventPayloads: false,
+    });
+    const res = await guard.run({
+        userMessage: "I forgot my password, can you help me reset it?",
+    });
+    strict_1.default.equal(res.blocked, false);
+});
+(0, node_test_1.default)("secrets: a real key=value secret still blocks input", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "input_only",
+        redactSecrets: true,
+        redactEventPayloads: false,
+    });
+    const res = await guard.run({
+        userMessage: "use api_key=sk_live_abcdef123456 please",
+    });
+    strict_1.default.equal(res.blocked, true);
+});
+// ---------------------------------------------------------------------------
+// Bug fix: allowlist is a per-match filter, not a whole-text bypass
+// ---------------------------------------------------------------------------
+(0, node_test_1.default)("allowlist: an allowlisted token does not disable secret detection", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "input_only",
+        redactSecrets: true,
+        redactEventPayloads: false,
+        allowPatterns: [/SAFE-TOKEN-OK/],
+    });
+    const res = await guard.run({
+        userMessage: "SAFE-TOKEN-OK and api_key=supersecretvalue123",
+    });
+    strict_1.default.equal(res.blocked, true);
+});
+(0, node_test_1.default)("allowlist: an allowlisted PII match is left untouched", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "input_only",
+        redactPII: true,
+        redactEventPayloads: false,
+        allowPatterns: [/support@muoro\.com/],
+    });
+    const res = await guard.run({ userMessage: "Contact support@muoro.com for help" });
+    strict_1.default.equal(res.blocked, false);
+    strict_1.default.equal(res.safeText.includes("support@muoro.com"), true);
+});
+// ---------------------------------------------------------------------------
+// RAG context is sanitized before it reaches the prompt
+// ---------------------------------------------------------------------------
+(0, node_test_1.default)("context: PII in RAG context is redacted before the LLM call", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "full",
+        redactPII: true,
+        redactEventPayloads: false,
+    });
+    let seenContext = "";
+    const res = await guard.run({
+        userMessage: "Summarize the customer record",
+        context: "Customer email is jane@example.com",
+        llm: async (messages) => {
+            seenContext =
+                messages.find((m) => m.role === "developer")?.content ?? "";
+            return "Here is a safe summary.";
+        },
+    });
+    strict_1.default.equal(res.blocked, false);
+    strict_1.default.equal(seenContext.includes("jane@example.com"), false);
+    strict_1.default.ok(seenContext.includes("[email removed]"));
+});
+// ---------------------------------------------------------------------------
+// Child-signal detector
+// ---------------------------------------------------------------------------
+(0, node_test_1.default)("childSignal detector: flags minors, ignores adult ages", () => {
+    strict_1.default.ok((0, childSignal_js_1.detectChildSignals)("my daughter is 8 years old").length > 0);
+    strict_1.default.ok((0, childSignal_js_1.detectChildSignals)("she is in grade 5").length > 0);
+    strict_1.default.equal((0, childSignal_js_1.detectChildSignals)("I am 34 years old and a backend developer").length, 0);
+});
+(0, node_test_1.default)("childSignal: flag mode emits an event without blocking", async () => {
+    const events = [];
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "input_only",
+        detectChildSignals: true,
+        dpdpEnforce: false,
+        redactEventPayloads: false,
+        onEvent: (e) => events.push(e),
+    });
+    const res = await guard.run({
+        userMessage: "my daughter is 8 years old, suggest some books",
+    });
+    strict_1.default.equal(res.blocked, false);
+    strict_1.default.ok(events.find((e) => e.kind === "CHILD_SIGNAL_DETECTED"), "Expected a CHILD_SIGNAL_DETECTED event");
+});
+// ---------------------------------------------------------------------------
+// dpdpEnforce: hard block + DPDPBlockedError
+// ---------------------------------------------------------------------------
+(0, node_test_1.default)("dpdpEnforce: Aadhaar in input throws DPDPBlockedError", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "input_only",
+        redactPII: true,
+        dpdpEnforce: true,
+        redactEventPayloads: false,
+    });
+    await strict_1.default.rejects(guard.run({ userMessage: "my aadhaar number is 234567890124" }), (err) => err instanceof errors_js_1.DPDPBlockedError && err.detector === "indianPii");
+});
+(0, node_test_1.default)("dpdpEnforce: child signal in input throws DPDPBlockedError", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "input_only",
+        detectChildSignals: true,
+        dpdpEnforce: true,
+        redactEventPayloads: false,
+    });
+    await strict_1.default.rejects(guard.run({ userMessage: "my daughter is 8 years old" }), (err) => err instanceof errors_js_1.DPDPBlockedError && err.detector === "childSignal");
+});
+(0, node_test_1.default)("dpdpEnforce: Aadhaar in output throws DPDPBlockedError", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "output_only",
+        redactPII: true,
+        dpdpEnforce: true,
+        redactEventPayloads: false,
+    });
+    await strict_1.default.rejects(guard.run({ output: "The Aadhaar on record is 234567890124." }), (err) => err instanceof errors_js_1.DPDPBlockedError && err.phase === "output");
+});
+(0, node_test_1.default)("dpdpEnforce: a non-DPDP block (secret) still returns, does not throw", async () => {
+    const guard = (0, createGuardrails_js_1.createGuardrails)({
+        mode: "input_only",
+        redactSecrets: true,
+        dpdpEnforce: true,
+        redactEventPayloads: false,
+    });
+    const res = await guard.run({
+        userMessage: "api_key=supersecretvalue123",
+    });
+    strict_1.default.equal(res.blocked, true);
+});
+// ---------------------------------------------------------------------------
+// Consent / evidence audit-trail events
+// ---------------------------------------------------------------------------
+(0, node_test_1.default)("recordConsent: emits a CONSENT_RECORDED compliance event", () => {
+    const events = [];
+    const guard = (0, createGuardrails_js_1.createGuardrails)({ onEvent: (e) => events.push(e) });
+    const e = guard.recordConsent({
+        dataPrincipalId: "user-123",
+        purpose: "marketing-personalisation",
+        granted: true,
+        noticeVersion: "v2",
+    });
+    strict_1.default.equal(e.kind, "CONSENT_RECORDED");
+    strict_1.default.equal(e.phase, "compliance");
+    strict_1.default.equal(events.length, 1);
+    strict_1.default.equal(events[0].meta?.purpose, "marketing-personalisation");
+    strict_1.default.equal(events[0].meta?.granted, true);
+});
+(0, node_test_1.default)("recordEvidence: emits an EVIDENCE_RECORDED compliance event", () => {
+    const events = [];
+    const guard = (0, createGuardrails_js_1.createGuardrails)({ onEvent: (e) => events.push(e) });
+    const e = guard.recordEvidence({
+        action: "model_inference",
+        purpose: "support-summarisation",
+        dataPrincipalId: "user-123",
+    });
+    strict_1.default.equal(e.kind, "EVIDENCE_RECORDED");
+    strict_1.default.equal(e.phase, "compliance");
+    strict_1.default.equal(events.length, 1);
+    strict_1.default.equal(events[0].meta?.action, "model_inference");
 });

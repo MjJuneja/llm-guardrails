@@ -1,5 +1,8 @@
 import type {
+  ConsentRecord,
+  EvidenceRecord,
   GuardEvent,
+  GuardPhase,
   Guardrails,
   GuardrailsConfig,
   GuardrailsRunInput,
@@ -9,11 +12,14 @@ import type {
   ToolCall,
 } from "./types.js";
 
-import { emit, nowIso, clipMatches, passesAllowlist } from "./utils.js";
+import { emit, nowIso, clipMatches, filterAllowlisted } from "./utils.js";
 import { maybeHash } from "./hash.js";
 import { defaultAnswerJsonValidator } from "./jsonValidator.js";
+import { DPDPBlockedError } from "./errors.js";
 
 import { detectPII, redactPII } from "../detectors/pii.js";
+import { detectIndianPII, redactIndianPII } from "../detectors/indianPii.js";
+import { detectChildSignals } from "../detectors/childSignal.js";
 import { detectSecrets, redactSecrets } from "../detectors/secrets.js";
 import { detectSQLLeak, redactSQLLeak } from "../detectors/sqlLeak.js";
 import { detectPromptLeak } from "../detectors/promptLeak.js";
@@ -79,6 +85,9 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
     blockSQLLeakage: config.blockSQLLeakage ?? true,
     blockPromptLeakage: config.blockPromptLeakage ?? true,
 
+    detectChildSignals: config.detectChildSignals ?? false,
+    dpdpEnforce: config.dpdpEnforce ?? false,
+
     maxRewriteAttempts: config.maxRewriteAttempts ?? 1,
     outputMode: config.outputMode ?? "text",
     systemGuardPrompt: config.systemGuardPrompt ?? DEFAULT_SYSTEM_GUARD,
@@ -101,7 +110,7 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
 
   function event(
     requestId: string,
-    phase: "input" | "output" | "tool",
+    phase: GuardPhase,
     e: Omit<GuardEvent, "ts" | "requestId" | "phase">,
   ): GuardEvent {
     return {
@@ -121,32 +130,75 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
 
     const inputDetections: Detection[] = [];
 
-    if (!passesAllowlist(userText, cfg.allowPatterns)) {
-      if (cfg.redactPII) {
-        const pii = detectPII(userText, cfg.piiOptions);
-        if (pii?.hasPII) {
-          const matches = (pii.detectedItems ?? []).flatMap(
-            (x: any) => x.items ?? [],
-          );
-          if (matches.length)
-            inputDetections.push({
-              detector: "pii",
-              matches,
-              severity: "medium",
-              action: "REDACT",
-            });
-        }
+    if (cfg.redactPII) {
+      const pii = detectPII(userText, cfg.piiOptions);
+      if (pii?.hasPII) {
+        const matches = filterAllowlisted(
+          (pii.detectedItems ?? []).flatMap((x: any) => x.items ?? []),
+          cfg.allowPatterns,
+        );
+        if (matches.length)
+          inputDetections.push({
+            detector: "pii",
+            matches,
+            severity: "medium",
+            action: "REDACT",
+          });
       }
 
-      if (cfg.redactSecrets) {
-        const secrets = detectSecrets(userText);
-        if (secrets.length)
+      const indianPii = detectIndianPII(userText);
+      if (indianPii.hasPII) {
+        const matches = filterAllowlisted(
+          indianPii.detectedItems.flatMap((x) => x.items),
+          cfg.allowPatterns,
+        );
+        if (matches.length)
           inputDetections.push({
-            detector: "secrets",
-            matches: secrets,
-            severity: "critical",
-            action: "BLOCK",
+            detector: "indianPii",
+            matches,
+            severity: "high",
+            action: "REDACT",
           });
+      }
+    }
+
+    if (cfg.redactSecrets) {
+      const secrets = filterAllowlisted(
+        detectSecrets(userText),
+        cfg.allowPatterns,
+      );
+      if (secrets.length)
+        inputDetections.push({
+          detector: "secrets",
+          matches: secrets,
+          severity: "critical",
+          action: "BLOCK",
+        });
+    }
+
+    if (cfg.detectChildSignals) {
+      const childMatches = filterAllowlisted(
+        detectChildSignals(userText),
+        cfg.allowPatterns,
+      );
+      if (childMatches.length) {
+        // Always flag via an event, even when not enforcing.
+        emit(
+          events,
+          cfg.onEvent,
+          event(requestId, "input", {
+            kind: "CHILD_SIGNAL_DETECTED",
+            detector: "childSignal",
+            severity: "high",
+            matches: maybeHash(clipMatches(childMatches), cfg.redactEventPayloads),
+          }),
+        );
+        inputDetections.push({
+          detector: "childSignal",
+          matches: childMatches,
+          severity: "high",
+          action: "BLOCK",
+        });
       }
     }
 
@@ -157,6 +209,29 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
     const inputDecision = decide(inputPolicyDetections);
 
     if (inputDecision.finalAction === "BLOCK") {
+      const dpdpReason = inputDecision.reasons.find(
+        (r) => r.detector === "indianPii" || r.detector === "childSignal",
+      );
+      if (cfg.dpdpEnforce && dpdpReason) {
+        emit(
+          events,
+          cfg.onEvent,
+          event(requestId, "input", {
+            kind: "DPDP_BLOCKED",
+            detector: dpdpReason.detector,
+            severity: "critical",
+            matches: maybeHash(
+              clipMatches(dpdpReason.matches),
+              cfg.redactEventPayloads,
+            ),
+          }),
+        );
+        throw new DPDPBlockedError(
+          "input",
+          dpdpReason.detector,
+          dpdpReason.matches,
+        );
+      }
       emit(
         events,
         cfg.onEvent,
@@ -181,7 +256,12 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
 
     if (inputDecision.finalAction === "REDACT") {
       const before = userText;
-      if (cfg.redactPII) userText = redactPII(userText, cfg.piiOptions);
+      if (cfg.redactPII) {
+        // Indian IDs first: Aadhaar would otherwise be caught by the generic
+        // numeric (bank account) pattern and mislabelled.
+        userText = redactIndianPII(userText);
+        userText = redactPII(userText, cfg.piiOptions);
+      }
       if (cfg.redactSecrets) userText = redactSecrets(userText);
 
       if (before !== userText) {
@@ -257,54 +337,96 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
         }
       }
 
-      if (!passesAllowlist(raw, cfg.allowPatterns)) {
-        if (cfg.redactSecrets) {
-          const secrets = detectSecrets(raw);
-          if (secrets.length)
+      if (cfg.redactSecrets) {
+        const secrets = filterAllowlisted(detectSecrets(raw), cfg.allowPatterns);
+        if (secrets.length)
+          outputDetections.push({
+            detector: "secrets",
+            matches: secrets,
+            severity: "critical",
+            action: "BLOCK",
+          });
+      }
+
+      if (cfg.redactPII) {
+        const pii = detectPII(raw, cfg.piiOptions);
+        if (pii?.hasPII) {
+          const matches = filterAllowlisted(
+            (pii.detectedItems ?? []).flatMap((x: any) => x.items ?? []),
+            cfg.allowPatterns,
+          );
+          if (matches.length)
             outputDetections.push({
-              detector: "secrets",
-              matches: secrets,
-              severity: "critical",
-              action: "BLOCK",
+              detector: "pii",
+              matches,
+              severity: "medium",
+              action: "REDACT",
             });
         }
 
-        if (cfg.redactPII) {
-          const pii = detectPII(raw, cfg.piiOptions);
-          if (pii?.hasPII) {
-            const matches = (pii.detectedItems ?? []).flatMap(
-              (x: any) => x.items ?? [],
-            );
-            if (matches.length)
-              outputDetections.push({
-                detector: "pii",
-                matches,
-                severity: "medium",
-                action: "REDACT",
-              });
-          }
-        }
-
-        if (cfg.blockSQLLeakage) {
-          const sql = detectSQLLeak(raw);
-          if (sql.length)
+        const indianPii = detectIndianPII(raw);
+        if (indianPii.hasPII) {
+          const matches = filterAllowlisted(
+            indianPii.detectedItems.flatMap((x) => x.items),
+            cfg.allowPatterns,
+          );
+          if (matches.length)
             outputDetections.push({
-              detector: "sqlLeak",
-              matches: sql,
+              detector: "indianPii",
+              matches,
               severity: "high",
-              action: "REWRITE",
+              action: "REDACT",
             });
         }
+      }
 
-        if (cfg.blockPromptLeakage) {
-          const pl = detectPromptLeak(raw);
-          if (pl.length)
-            outputDetections.push({
-              detector: "promptLeak",
-              matches: pl,
+      if (cfg.blockSQLLeakage) {
+        const sql = filterAllowlisted(detectSQLLeak(raw), cfg.allowPatterns);
+        if (sql.length)
+          outputDetections.push({
+            detector: "sqlLeak",
+            matches: sql,
+            severity: "high",
+            action: "REWRITE",
+          });
+      }
+
+      if (cfg.blockPromptLeakage) {
+        const pl = filterAllowlisted(detectPromptLeak(raw), cfg.allowPatterns);
+        if (pl.length)
+          outputDetections.push({
+            detector: "promptLeak",
+            matches: pl,
+            severity: "high",
+            action: "REWRITE",
+          });
+      }
+
+      if (cfg.detectChildSignals) {
+        const childMatches = filterAllowlisted(
+          detectChildSignals(raw),
+          cfg.allowPatterns,
+        );
+        if (childMatches.length) {
+          emit(
+            events,
+            cfg.onEvent,
+            event(requestId, "output", {
+              kind: "CHILD_SIGNAL_DETECTED",
+              detector: "childSignal",
               severity: "high",
-              action: "REWRITE",
-            });
+              matches: maybeHash(
+                clipMatches(childMatches),
+                cfg.redactEventPayloads,
+              ),
+            }),
+          );
+          outputDetections.push({
+            detector: "childSignal",
+            matches: childMatches,
+            severity: "high",
+            action: "BLOCK",
+          });
         }
       }
 
@@ -328,7 +450,10 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
 
       if (outDecision.finalAction === "REDACT") {
         const before = raw;
-        if (cfg.redactPII) raw = redactPII(raw, cfg.piiOptions);
+        if (cfg.redactPII) {
+          raw = redactIndianPII(raw);
+          raw = redactPII(raw, cfg.piiOptions);
+        }
         if (cfg.redactSecrets) raw = redactSecrets(raw);
         raw = redactSQLLeak(raw);
 
@@ -368,6 +493,29 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
 
       // validateOutput cannot rewrite without LLM
       if (outDecision.finalAction === "REWRITE" || attempts >= 0) {
+        const dpdpReason = outDecision.reasons.find(
+          (r) => r.detector === "indianPii" || r.detector === "childSignal",
+        );
+        if (cfg.dpdpEnforce && dpdpReason && outDecision.finalAction === "BLOCK") {
+          emit(
+            events,
+            cfg.onEvent,
+            event(requestId, "output", {
+              kind: "DPDP_BLOCKED",
+              detector: dpdpReason.detector,
+              severity: "critical",
+              matches: maybeHash(
+                clipMatches(dpdpReason.matches),
+                cfg.redactEventPayloads,
+              ),
+            }),
+          );
+          throw new DPDPBlockedError(
+            "output",
+            dpdpReason.detector,
+            dpdpReason.matches,
+          );
+        }
         emit(
           events,
           cfg.onEvent,
@@ -434,14 +582,31 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
       };
     }
 
+    // RAG context is also untrusted input: redact PII/secrets in retrieved
+    // documents before they reach the prompt. A secret in context blocks.
+    let safeContext = input.context;
+    if (safeContext) {
+      const ctxRes = validateInput(safeContext, requestId);
+      events.push(...ctxRes.events);
+      if (ctxRes.blocked) {
+        return {
+          safeText: ctxRes.sanitizedText,
+          blocked: true,
+          events,
+          inputDetections: inRes.detections,
+        };
+      }
+      safeContext = ctxRes.sanitizedText;
+    }
+
     const messages: LLMMessage[] = [
       { role: "system", content: cfg.systemGuardPrompt },
       ...(input.preMessages ?? []),
-      ...(input.context
+      ...(safeContext
         ? [
             {
               role: "developer" as const,
-              content: `Context:\n${input.context}`,
+              content: `Context:\n${safeContext}`,
             },
           ]
         : []),
@@ -641,11 +806,46 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
     return { payload: out, events };
   }
 
+  function recordConsent(record: ConsentRecord): GuardEvent {
+    const e = event(cfg.requestIdFactory(), "compliance", {
+      kind: "CONSENT_RECORDED",
+      detector: "consent",
+      severity: "low",
+      meta: {
+        dataPrincipalId: record.dataPrincipalId,
+        purpose: record.purpose,
+        granted: record.granted,
+        noticeVersion: record.noticeVersion,
+        ...record.meta,
+      },
+    });
+    cfg.onEvent?.(e);
+    return e;
+  }
+
+  function recordEvidence(record: EvidenceRecord): GuardEvent {
+    const e = event(cfg.requestIdFactory(), "compliance", {
+      kind: "EVIDENCE_RECORDED",
+      detector: "evidence",
+      severity: "low",
+      meta: {
+        action: record.action,
+        purpose: record.purpose,
+        dataPrincipalId: record.dataPrincipalId,
+        ...record.meta,
+      },
+    });
+    cfg.onEvent?.(e);
+    return e;
+  }
+
   return {
     run,
     validateInput,
     validateOutput,
     validateToolCall,
     sanitizeToolResult,
+    recordConsent,
+    recordEvidence,
   };
 }

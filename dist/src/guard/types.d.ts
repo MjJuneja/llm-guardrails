@@ -5,16 +5,35 @@ export type LLMMessage = {
 };
 export type LLMCaller = (messages: LLMMessage[]) => Promise<string>;
 export type GuardAction = "ALLOW" | "REDACT" | "BLOCK" | "REWRITE";
-export type GuardPhase = "input" | "output" | "tool";
+export type GuardPhase = "input" | "output" | "tool" | "compliance";
 export type Severity = "low" | "medium" | "high" | "critical";
 export type GuardEvent = {
     ts: string;
     requestId: string;
     phase: GuardPhase;
-    kind: "INPUT_REDACTED" | "INPUT_BLOCKED" | "OUTPUT_REDACTED" | "OUTPUT_BLOCKED" | "OUTPUT_REWRITE_ATTEMPT" | "OUTPUT_REWRITE_SUCCESS" | "OUTPUT_REWRITE_FAILED" | "OUTPUT_JSON_INVALID" | "TOOL_CALL_BLOCKED" | "TOOL_RESULT_REDACTED";
+    kind: "INPUT_REDACTED" | "INPUT_BLOCKED" | "OUTPUT_REDACTED" | "OUTPUT_BLOCKED" | "OUTPUT_REWRITE_ATTEMPT" | "OUTPUT_REWRITE_SUCCESS" | "OUTPUT_REWRITE_FAILED" | "OUTPUT_JSON_INVALID" | "TOOL_CALL_BLOCKED" | "TOOL_RESULT_REDACTED" | "CHILD_SIGNAL_DETECTED" | "DPDP_BLOCKED" | "CONSENT_RECORDED" | "EVIDENCE_RECORDED";
     detector: string;
     severity?: Severity;
     matches?: string[];
+    meta?: Record<string, unknown>;
+};
+/**
+ * A consent record for the DPDP audit trail. Logged via `recordConsent`.
+ * `dataPrincipalId` is stored as-is in the event meta — pass a pseudonymous id
+ * if you do not want raw identifiers in your logs.
+ */
+export type ConsentRecord = {
+    dataPrincipalId: string;
+    purpose: string;
+    granted: boolean;
+    noticeVersion?: string;
+    meta?: Record<string, unknown>;
+};
+/** Evidence of a processing activity for the DPDP audit trail. */
+export type EvidenceRecord = {
+    action: string;
+    purpose: string;
+    dataPrincipalId?: string;
     meta?: Record<string, unknown>;
 };
 export type OutputJsonValidatorResult = {
@@ -50,6 +69,8 @@ export type GuardrailsConfig = {
     redactSecrets?: boolean;
     blockSQLLeakage?: boolean;
     blockPromptLeakage?: boolean;
+    detectChildSignals?: boolean;
+    dpdpEnforce?: boolean;
     maxRewriteAttempts?: number;
     outputMode?: "text" | "json";
     systemGuardPrompt?: string;
@@ -97,4 +118,6 @@ export type Guardrails = {
         payload: unknown;
         events: GuardEvent[];
     };
+    recordConsent(record: ConsentRecord): GuardEvent;
+    recordEvidence(record: EvidenceRecord): GuardEvent;
 };

@@ -4,7 +4,10 @@ exports.createGuardrails = createGuardrails;
 const utils_js_1 = require("./utils.js");
 const hash_js_1 = require("./hash.js");
 const jsonValidator_js_1 = require("./jsonValidator.js");
+const errors_js_1 = require("./errors.js");
 const pii_js_1 = require("../detectors/pii.js");
+const indianPii_js_1 = require("../detectors/indianPii.js");
+const childSignal_js_1 = require("../detectors/childSignal.js");
 const secrets_js_1 = require("../detectors/secrets.js");
 const sqlLeak_js_1 = require("../detectors/sqlLeak.js");
 const promptLeak_js_1 = require("../detectors/promptLeak.js");
@@ -30,6 +33,8 @@ function createGuardrails(config = {}) {
         redactSecrets: config.redactSecrets ?? true,
         blockSQLLeakage: config.blockSQLLeakage ?? true,
         blockPromptLeakage: config.blockPromptLeakage ?? true,
+        detectChildSignals: config.detectChildSignals ?? false,
+        dpdpEnforce: config.dpdpEnforce ?? false,
         maxRewriteAttempts: config.maxRewriteAttempts ?? 1,
         outputMode: config.outputMode ?? "text",
         systemGuardPrompt: config.systemGuardPrompt ?? DEFAULT_SYSTEM_GUARD,
@@ -55,34 +60,71 @@ function createGuardrails(config = {}) {
         const events = [];
         let userText = text;
         const inputDetections = [];
-        if (!(0, utils_js_1.passesAllowlist)(userText, cfg.allowPatterns)) {
-            if (cfg.redactPII) {
-                const pii = (0, pii_js_1.detectPII)(userText, cfg.piiOptions);
-                if (pii?.hasPII) {
-                    const matches = (pii.detectedItems ?? []).flatMap((x) => x.items ?? []);
-                    if (matches.length)
-                        inputDetections.push({
-                            detector: "pii",
-                            matches,
-                            severity: "medium",
-                            action: "REDACT",
-                        });
-                }
-            }
-            if (cfg.redactSecrets) {
-                const secrets = (0, secrets_js_1.detectSecrets)(userText);
-                if (secrets.length)
+        if (cfg.redactPII) {
+            const pii = (0, pii_js_1.detectPII)(userText, cfg.piiOptions);
+            if (pii?.hasPII) {
+                const matches = (0, utils_js_1.filterAllowlisted)((pii.detectedItems ?? []).flatMap((x) => x.items ?? []), cfg.allowPatterns);
+                if (matches.length)
                     inputDetections.push({
-                        detector: "secrets",
-                        matches: secrets,
-                        severity: "critical",
-                        action: "BLOCK",
+                        detector: "pii",
+                        matches,
+                        severity: "medium",
+                        action: "REDACT",
                     });
+            }
+            const indianPii = (0, indianPii_js_1.detectIndianPII)(userText);
+            if (indianPii.hasPII) {
+                const matches = (0, utils_js_1.filterAllowlisted)(indianPii.detectedItems.flatMap((x) => x.items), cfg.allowPatterns);
+                if (matches.length)
+                    inputDetections.push({
+                        detector: "indianPii",
+                        matches,
+                        severity: "high",
+                        action: "REDACT",
+                    });
+            }
+        }
+        if (cfg.redactSecrets) {
+            const secrets = (0, utils_js_1.filterAllowlisted)((0, secrets_js_1.detectSecrets)(userText), cfg.allowPatterns);
+            if (secrets.length)
+                inputDetections.push({
+                    detector: "secrets",
+                    matches: secrets,
+                    severity: "critical",
+                    action: "BLOCK",
+                });
+        }
+        if (cfg.detectChildSignals) {
+            const childMatches = (0, utils_js_1.filterAllowlisted)((0, childSignal_js_1.detectChildSignals)(userText), cfg.allowPatterns);
+            if (childMatches.length) {
+                // Always flag via an event, even when not enforcing.
+                (0, utils_js_1.emit)(events, cfg.onEvent, event(requestId, "input", {
+                    kind: "CHILD_SIGNAL_DETECTED",
+                    detector: "childSignal",
+                    severity: "high",
+                    matches: (0, hash_js_1.maybeHash)((0, utils_js_1.clipMatches)(childMatches), cfg.redactEventPayloads),
+                }));
+                inputDetections.push({
+                    detector: "childSignal",
+                    matches: childMatches,
+                    severity: "high",
+                    action: "BLOCK",
+                });
             }
         }
         const inputPolicyDetections = (0, defaultPolicy_js_1.defaultInputPolicy)(inputDetections, cfg);
         const inputDecision = (0, actions_js_1.decide)(inputPolicyDetections);
         if (inputDecision.finalAction === "BLOCK") {
+            const dpdpReason = inputDecision.reasons.find((r) => r.detector === "indianPii" || r.detector === "childSignal");
+            if (cfg.dpdpEnforce && dpdpReason) {
+                (0, utils_js_1.emit)(events, cfg.onEvent, event(requestId, "input", {
+                    kind: "DPDP_BLOCKED",
+                    detector: dpdpReason.detector,
+                    severity: "critical",
+                    matches: (0, hash_js_1.maybeHash)((0, utils_js_1.clipMatches)(dpdpReason.matches), cfg.redactEventPayloads),
+                }));
+                throw new errors_js_1.DPDPBlockedError("input", dpdpReason.detector, dpdpReason.matches);
+            }
             (0, utils_js_1.emit)(events, cfg.onEvent, event(requestId, "input", {
                 kind: "INPUT_BLOCKED",
                 detector: inputDecision.reasons[0]?.detector ?? "unknown",
@@ -99,8 +141,12 @@ function createGuardrails(config = {}) {
         }
         if (inputDecision.finalAction === "REDACT") {
             const before = userText;
-            if (cfg.redactPII)
+            if (cfg.redactPII) {
+                // Indian IDs first: Aadhaar would otherwise be caught by the generic
+                // numeric (bank account) pattern and mislabelled.
+                userText = (0, indianPii_js_1.redactIndianPII)(userText);
                 userText = (0, pii_js_1.redactPII)(userText, cfg.piiOptions);
+            }
             if (cfg.redactSecrets)
                 userText = (0, secrets_js_1.redactSecrets)(userText);
             if (before !== userText) {
@@ -154,49 +200,75 @@ function createGuardrails(config = {}) {
                     };
                 }
             }
-            if (!(0, utils_js_1.passesAllowlist)(raw, cfg.allowPatterns)) {
-                if (cfg.redactSecrets) {
-                    const secrets = (0, secrets_js_1.detectSecrets)(raw);
-                    if (secrets.length)
+            if (cfg.redactSecrets) {
+                const secrets = (0, utils_js_1.filterAllowlisted)((0, secrets_js_1.detectSecrets)(raw), cfg.allowPatterns);
+                if (secrets.length)
+                    outputDetections.push({
+                        detector: "secrets",
+                        matches: secrets,
+                        severity: "critical",
+                        action: "BLOCK",
+                    });
+            }
+            if (cfg.redactPII) {
+                const pii = (0, pii_js_1.detectPII)(raw, cfg.piiOptions);
+                if (pii?.hasPII) {
+                    const matches = (0, utils_js_1.filterAllowlisted)((pii.detectedItems ?? []).flatMap((x) => x.items ?? []), cfg.allowPatterns);
+                    if (matches.length)
                         outputDetections.push({
-                            detector: "secrets",
-                            matches: secrets,
-                            severity: "critical",
-                            action: "BLOCK",
+                            detector: "pii",
+                            matches,
+                            severity: "medium",
+                            action: "REDACT",
                         });
                 }
-                if (cfg.redactPII) {
-                    const pii = (0, pii_js_1.detectPII)(raw, cfg.piiOptions);
-                    if (pii?.hasPII) {
-                        const matches = (pii.detectedItems ?? []).flatMap((x) => x.items ?? []);
-                        if (matches.length)
-                            outputDetections.push({
-                                detector: "pii",
-                                matches,
-                                severity: "medium",
-                                action: "REDACT",
-                            });
-                    }
-                }
-                if (cfg.blockSQLLeakage) {
-                    const sql = (0, sqlLeak_js_1.detectSQLLeak)(raw);
-                    if (sql.length)
+                const indianPii = (0, indianPii_js_1.detectIndianPII)(raw);
+                if (indianPii.hasPII) {
+                    const matches = (0, utils_js_1.filterAllowlisted)(indianPii.detectedItems.flatMap((x) => x.items), cfg.allowPatterns);
+                    if (matches.length)
                         outputDetections.push({
-                            detector: "sqlLeak",
-                            matches: sql,
+                            detector: "indianPii",
+                            matches,
                             severity: "high",
-                            action: "REWRITE",
+                            action: "REDACT",
                         });
                 }
-                if (cfg.blockPromptLeakage) {
-                    const pl = (0, promptLeak_js_1.detectPromptLeak)(raw);
-                    if (pl.length)
-                        outputDetections.push({
-                            detector: "promptLeak",
-                            matches: pl,
-                            severity: "high",
-                            action: "REWRITE",
-                        });
+            }
+            if (cfg.blockSQLLeakage) {
+                const sql = (0, utils_js_1.filterAllowlisted)((0, sqlLeak_js_1.detectSQLLeak)(raw), cfg.allowPatterns);
+                if (sql.length)
+                    outputDetections.push({
+                        detector: "sqlLeak",
+                        matches: sql,
+                        severity: "high",
+                        action: "REWRITE",
+                    });
+            }
+            if (cfg.blockPromptLeakage) {
+                const pl = (0, utils_js_1.filterAllowlisted)((0, promptLeak_js_1.detectPromptLeak)(raw), cfg.allowPatterns);
+                if (pl.length)
+                    outputDetections.push({
+                        detector: "promptLeak",
+                        matches: pl,
+                        severity: "high",
+                        action: "REWRITE",
+                    });
+            }
+            if (cfg.detectChildSignals) {
+                const childMatches = (0, utils_js_1.filterAllowlisted)((0, childSignal_js_1.detectChildSignals)(raw), cfg.allowPatterns);
+                if (childMatches.length) {
+                    (0, utils_js_1.emit)(events, cfg.onEvent, event(requestId, "output", {
+                        kind: "CHILD_SIGNAL_DETECTED",
+                        detector: "childSignal",
+                        severity: "high",
+                        matches: (0, hash_js_1.maybeHash)((0, utils_js_1.clipMatches)(childMatches), cfg.redactEventPayloads),
+                    }));
+                    outputDetections.push({
+                        detector: "childSignal",
+                        matches: childMatches,
+                        severity: "high",
+                        action: "BLOCK",
+                    });
                 }
             }
             const outputPolicyDetections = (0, defaultPolicy_js_1.defaultOutputPolicy)(outputDetections, cfg);
@@ -214,8 +286,10 @@ function createGuardrails(config = {}) {
             }
             if (outDecision.finalAction === "REDACT") {
                 const before = raw;
-                if (cfg.redactPII)
+                if (cfg.redactPII) {
+                    raw = (0, indianPii_js_1.redactIndianPII)(raw);
                     raw = (0, pii_js_1.redactPII)(raw, cfg.piiOptions);
+                }
                 if (cfg.redactSecrets)
                     raw = (0, secrets_js_1.redactSecrets)(raw);
                 raw = (0, sqlLeak_js_1.redactSQLLeak)(raw);
@@ -244,6 +318,16 @@ function createGuardrails(config = {}) {
             }
             // validateOutput cannot rewrite without LLM
             if (outDecision.finalAction === "REWRITE" || attempts >= 0) {
+                const dpdpReason = outDecision.reasons.find((r) => r.detector === "indianPii" || r.detector === "childSignal");
+                if (cfg.dpdpEnforce && dpdpReason && outDecision.finalAction === "BLOCK") {
+                    (0, utils_js_1.emit)(events, cfg.onEvent, event(requestId, "output", {
+                        kind: "DPDP_BLOCKED",
+                        detector: dpdpReason.detector,
+                        severity: "critical",
+                        matches: (0, hash_js_1.maybeHash)((0, utils_js_1.clipMatches)(dpdpReason.matches), cfg.redactEventPayloads),
+                    }));
+                    throw new errors_js_1.DPDPBlockedError("output", dpdpReason.detector, dpdpReason.matches);
+                }
                 (0, utils_js_1.emit)(events, cfg.onEvent, event(requestId, "output", {
                     kind: "OUTPUT_BLOCKED",
                     detector: outDecision.reasons[0]?.detector ?? "rewrite",
@@ -298,14 +382,30 @@ function createGuardrails(config = {}) {
                 inputDetections: inRes.detections,
             };
         }
+        // RAG context is also untrusted input: redact PII/secrets in retrieved
+        // documents before they reach the prompt. A secret in context blocks.
+        let safeContext = input.context;
+        if (safeContext) {
+            const ctxRes = validateInput(safeContext, requestId);
+            events.push(...ctxRes.events);
+            if (ctxRes.blocked) {
+                return {
+                    safeText: ctxRes.sanitizedText,
+                    blocked: true,
+                    events,
+                    inputDetections: inRes.detections,
+                };
+            }
+            safeContext = ctxRes.sanitizedText;
+        }
         const messages = [
             { role: "system", content: cfg.systemGuardPrompt },
             ...(input.preMessages ?? []),
-            ...(input.context
+            ...(safeContext
                 ? [
                     {
                         role: "developer",
-                        content: `Context:\n${input.context}`,
+                        content: `Context:\n${safeContext}`,
                     },
                 ]
                 : []),
@@ -458,11 +558,44 @@ function createGuardrails(config = {}) {
         }
         return { payload: out, events };
     }
+    function recordConsent(record) {
+        const e = event(cfg.requestIdFactory(), "compliance", {
+            kind: "CONSENT_RECORDED",
+            detector: "consent",
+            severity: "low",
+            meta: {
+                dataPrincipalId: record.dataPrincipalId,
+                purpose: record.purpose,
+                granted: record.granted,
+                noticeVersion: record.noticeVersion,
+                ...record.meta,
+            },
+        });
+        cfg.onEvent?.(e);
+        return e;
+    }
+    function recordEvidence(record) {
+        const e = event(cfg.requestIdFactory(), "compliance", {
+            kind: "EVIDENCE_RECORDED",
+            detector: "evidence",
+            severity: "low",
+            meta: {
+                action: record.action,
+                purpose: record.purpose,
+                dataPrincipalId: record.dataPrincipalId,
+                ...record.meta,
+            },
+        });
+        cfg.onEvent?.(e);
+        return e;
+    }
     return {
         run,
         validateInput,
         validateOutput,
         validateToolCall,
         sanitizeToolResult,
+        recordConsent,
+        recordEvidence,
     };
 }

@@ -18,7 +18,10 @@ const SECRET_PATTERNS = [
     // 5) Generic key/value secrets (THIS will catch rsa_key=SECRET)
     // - catches: rsa_key=..., private_key: ..., apiKey=..., token=..., secret=...
     // - avoids very short values
-    { name: "generic_kv_secret", re: /\b(?:rsa|dsa|ecdsa|ed25519)?_?(?:private_?)?key|api_?key|apikey|access_?key|secret|token|pass(?:word)?|pwd|client_?secret|refresh_?token\b\s*[:=]\s*["']?[^\s"']{6,}["']?/gi },
+    // The keyword alternation is grouped so the `[:=] value` requirement applies
+    // to every keyword. Without the group, `|` precedence attached it only to the
+    // last branch, so bare words ("secret", "password") matched anywhere.
+    { name: "generic_kv_secret", re: /\b(?:(?:rsa|dsa|ecdsa|ed25519)?_?(?:private_?)?key|api_?key|apikey|access_?key|secret|token|pass(?:word)?|pwd|client_?secret|refresh_?token)\b\s*[:=]\s*["']?[^\s"']{6,}["']?/gi },
     // 6) PEM-ish base64 blobs that often indicate keys/certs (optional, conservative)
     // { name: "base64_blob", re: /\b[A-Za-z0-9+/]{120,}={0,2}\b/g },
 ];
