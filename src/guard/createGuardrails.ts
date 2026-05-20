@@ -7,12 +7,19 @@ import type {
   GuardrailsConfig,
   GuardrailsRunInput,
   GuardrailsRunResult,
+  GuardrailsStreamInput,
   LLMMessage,
   ValidatePhaseResult,
   ToolCall,
 } from "./types.js";
 
-import { emit, nowIso, clipMatches, filterAllowlisted } from "./utils.js";
+import {
+  emit,
+  nowIso,
+  clipMatches,
+  filterAllowlisted,
+  commonPrefixLen,
+} from "./utils.js";
 import { maybeHash } from "./hash.js";
 import { defaultAnswerJsonValidator } from "./jsonValidator.js";
 import { DPDPBlockedError } from "./errors.js";
@@ -20,6 +27,7 @@ import { DPDPBlockedError } from "./errors.js";
 import { detectPII, redactPII } from "../detectors/pii.js";
 import { detectIndianPII, redactIndianPII } from "../detectors/indianPii.js";
 import { detectChildSignals } from "../detectors/childSignal.js";
+import { detectPromptInjection } from "../detectors/promptInjection.js";
 import { detectSecrets, redactSecrets } from "../detectors/secrets.js";
 import { detectSQLLeak, redactSQLLeak } from "../detectors/sqlLeak.js";
 import { detectPromptLeak } from "../detectors/promptLeak.js";
@@ -84,9 +92,12 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
     redactSecrets: config.redactSecrets ?? true,
     blockSQLLeakage: config.blockSQLLeakage ?? true,
     blockPromptLeakage: config.blockPromptLeakage ?? true,
+    blockPromptInjection: config.blockPromptInjection ?? false,
 
     detectChildSignals: config.detectChildSignals ?? false,
     dpdpEnforce: config.dpdpEnforce ?? false,
+
+    streamHoldback: config.streamHoldback ?? 1024,
 
     maxRewriteAttempts: config.maxRewriteAttempts ?? 1,
     outputMode: config.outputMode ?? "text",
@@ -196,6 +207,31 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
         inputDetections.push({
           detector: "childSignal",
           matches: childMatches,
+          severity: "high",
+          action: "BLOCK",
+        });
+      }
+    }
+
+    if (cfg.blockPromptInjection) {
+      const injMatches = filterAllowlisted(
+        detectPromptInjection(userText),
+        cfg.allowPatterns,
+      );
+      if (injMatches.length) {
+        emit(
+          events,
+          cfg.onEvent,
+          event(requestId, "input", {
+            kind: "PROMPT_INJECTION_DETECTED",
+            detector: "promptInjection",
+            severity: "high",
+            matches: maybeHash(clipMatches(injMatches), cfg.redactEventPayloads),
+          }),
+        );
+        inputDetections.push({
+          detector: "promptInjection",
+          matches: injMatches,
           severity: "high",
           action: "BLOCK",
         });
@@ -839,8 +875,118 @@ export function createGuardrails(config: GuardrailsConfig = {}): Guardrails {
     return e;
   }
 
+  function redactStreamText(text: string): string {
+    let out = text;
+    if (cfg.redactPII) {
+      out = redactIndianPII(out);
+      out = redactPII(out, cfg.piiOptions);
+    }
+    if (cfg.redactSecrets) out = redactSecrets(out);
+    if (cfg.blockSQLLeakage) out = redactSQLLeak(out);
+    return out;
+  }
+
+  async function* runStream(
+    input: GuardrailsStreamInput,
+  ): AsyncGenerator<string> {
+    const requestId = input.requestId ?? cfg.requestIdFactory();
+
+    // Guard the user message and RAG context before the model sees them.
+    const inRes = validateInput(input.userMessage ?? "", requestId);
+    if (inRes.blocked) {
+      yield cfg.blockMessage;
+      return;
+    }
+
+    let safeContext = input.context;
+    if (safeContext) {
+      const ctxRes = validateInput(safeContext, requestId);
+      if (ctxRes.blocked) {
+        yield cfg.blockMessage;
+        return;
+      }
+      safeContext = ctxRes.sanitizedText;
+    }
+
+    const messages: LLMMessage[] = [
+      { role: "system", content: cfg.systemGuardPrompt },
+      ...(input.preMessages ?? []),
+      ...(safeContext
+        ? [{ role: "developer" as const, content: `Context:\n${safeContext}` }]
+        : []),
+      { role: "user", content: inRes.sanitizedText },
+    ];
+
+    const holdback = Math.max(0, cfg.streamHoldback);
+    let raw = "";
+    let prevRedacted = "";
+    let emittedLen = 0;
+    let redactedAnything = false;
+
+    // Under dpdpEnforce a completed Indian-ID match stops the stream hard.
+    const enforceDpdp = () => {
+      if (!cfg.dpdpEnforce || !cfg.redactPII) return;
+      const ip = detectIndianPII(raw);
+      if (!ip.hasPII) return;
+      const matches = ip.detectedItems.flatMap((x) => x.items);
+      emit(
+        [],
+        cfg.onEvent,
+        event(requestId, "output", {
+          kind: "DPDP_BLOCKED",
+          detector: "indianPii",
+          severity: "critical",
+          matches: maybeHash(clipMatches(matches), cfg.redactEventPayloads),
+        }),
+      );
+      throw new DPDPBlockedError("output", "indianPii", matches);
+    };
+
+    for await (const chunk of input.llmStream(messages)) {
+      raw += chunk;
+      enforceDpdp();
+
+      const redacted = redactStreamText(raw);
+      if (redacted !== raw) redactedAnything = true;
+
+      // Emit only text that (a) two consecutive redactions agree on and
+      // (b) sits at least `holdback` chars behind the live edge — so a match
+      // still being streamed cannot change something already emitted.
+      const stable = commonPrefixLen(prevRedacted, redacted);
+      const safeEdge = Math.max(0, redacted.length - holdback);
+      const emitUpto = Math.max(emittedLen, Math.min(stable, safeEdge));
+
+      if (emitUpto > emittedLen) {
+        yield redacted.slice(emittedLen, emitUpto);
+        emittedLen = emitUpto;
+      }
+      prevRedacted = redacted;
+    }
+
+    // Stream complete — the held-back tail is now final, flush it.
+    enforceDpdp();
+    const finalRedacted = redactStreamText(raw);
+    if (finalRedacted !== raw) redactedAnything = true;
+    if (finalRedacted.length > emittedLen) {
+      yield finalRedacted.slice(emittedLen);
+    }
+
+    if (redactedAnything) {
+      emit(
+        [],
+        cfg.onEvent,
+        event(requestId, "output", {
+          kind: "OUTPUT_REDACTED",
+          detector: "stream",
+          severity: "medium",
+        }),
+      );
+    }
+  }
+
   return {
     run,
+    runStream,
     validateInput,
     validateOutput,
     validateToolCall,

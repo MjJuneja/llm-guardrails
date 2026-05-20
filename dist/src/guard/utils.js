@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.nowIso = nowIso;
 exports.emit = emit;
 exports.unique = unique;
+exports.commonPrefixLen = commonPrefixLen;
 exports.clipMatches = clipMatches;
 exports.applyRedactions = applyRedactions;
 exports.filterAllowlisted = filterAllowlisted;
@@ -15,6 +16,14 @@ function emit(events, onEvent, e) {
 }
 function unique(arr) {
     return Array.from(new Set(arr));
+}
+/** Length of the longest common prefix of two strings. */
+function commonPrefixLen(a, b) {
+    const n = Math.min(a.length, b.length);
+    let i = 0;
+    while (i < n && a[i] === b[i])
+        i++;
+    return i;
 }
 function clipMatches(matches, max = 8, maxLen = 64) {
     const clipped = matches.slice(0, max).map((m) => (m.length > maxLen ? m.slice(0, maxLen) + "…" : m));

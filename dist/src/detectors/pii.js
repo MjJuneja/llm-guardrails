@@ -8,6 +8,28 @@ exports.validatePIICompliance = validatePIICompliance;
 exports.processBatch = processBatch;
 exports.getAvailableTypes = getAvailableTypes;
 exports.createCustomPattern = createCustomPattern;
+/**
+ * Luhn checksum — a real credit-card number always passes it, so this drops
+ * ~90% of false positives where a 16-digit number is not a card.
+ */
+function luhnValid(value) {
+    const digits = value.replace(/\D/g, '');
+    if (digits.length < 12 || digits.length > 19)
+        return false;
+    let sum = 0;
+    let double = false;
+    for (let i = digits.length - 1; i >= 0; i--) {
+        let d = digits.charCodeAt(i) - 48;
+        if (double) {
+            d *= 2;
+            if (d > 9)
+                d -= 9;
+        }
+        sum += d;
+        double = !double;
+    }
+    return sum % 10 === 0;
+}
 const PII_PATTERNS = {
     email: {
         pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g,
@@ -15,7 +37,10 @@ const PII_PATTERNS = {
         description: 'Email addresses'
     },
     phone: {
-        pattern: /(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})(?:\s?(?:ext|x|extension)\.?\s?(\d+))?/g,
+        // Alphanumeric lookbehind/lookahead so a 10-digit run embedded in a longer
+        // number (an order id, a timestamp) or inside an alphanumeric token (an API
+        // key) is not mistaken for a phone number.
+        pattern: /(?<![0-9A-Za-z_])(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}(?:\s?(?:ext|x|extension)\.?\s?[0-9]+)?(?![0-9A-Za-z_])/g,
         replacement: '[phone removed]',
         description: 'Phone numbers'
     },
@@ -27,7 +52,8 @@ const PII_PATTERNS = {
     creditCard: {
         pattern: /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g,
         replacement: '[credit card removed]',
-        description: 'Credit card numbers'
+        description: 'Credit card numbers',
+        validate: luhnValid
     },
     ipAddress: {
         pattern: /\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/g,
@@ -55,7 +81,9 @@ const PII_PATTERNS = {
         description: 'ZIP codes'
     },
     bankAccount: {
-        pattern: /\b\d{8,17}\b/g,
+        // Context-required: a bare 8-17 digit number (order id, timestamp, etc.)
+        // is NOT assumed to be an account. The word account/acct/a/c must precede it.
+        pattern: /\b(?:account|acct|a\/c)\b[^\d\n]{0,20}?\d{8,17}\b/gi,
         replacement: '[bank account removed]',
         description: 'Bank account numbers'
     },
@@ -118,8 +146,11 @@ function redactPII(text, options = {}) {
         const patternInfo = PII_PATTERNS[type];
         const pattern = patternInfo?.pattern || settings.pattern;
         const replacement = settings.replacement || patternInfo?.replacement || '[PII removed]';
+        const validate = patternInfo?.validate;
         if (pattern) {
-            cleanedText = cleanedText.replace(pattern, replacement);
+            cleanedText = validate
+                ? cleanedText.replace(pattern, (m) => (validate(m) ? replacement : m))
+                : cleanedText.replace(pattern, replacement);
         }
     }
     return cleanedText;
@@ -135,16 +166,20 @@ function redactPIIDetailed(text, options = {}) {
         const patternInfo = PII_PATTERNS[type];
         const pattern = patternInfo?.pattern || settings.pattern;
         const replacement = settings.replacement || patternInfo?.replacement || '[PII removed]';
+        const validate = patternInfo?.validate;
         if (pattern) {
-            const matches = cleanedText.match(pattern);
-            if (matches) {
+            const allMatches = cleanedText.match(pattern) || [];
+            const matches = validate ? allMatches.filter(validate) : allMatches;
+            if (matches.length) {
                 removedItems.push({
                     type,
                     count: matches.length,
                     items: matches.slice(),
                     description: patternInfo?.description || `${type} data`
                 });
-                cleanedText = cleanedText.replace(pattern, replacement);
+                cleanedText = validate
+                    ? cleanedText.replace(pattern, (m) => (validate(m) ? replacement : m))
+                    : cleanedText.replace(pattern, replacement);
             }
         }
     }
@@ -163,18 +198,21 @@ function detectPII(text, options = {}) {
     for (const [type, settings] of Object.entries(config)) {
         const patternInfo = PII_PATTERNS[type];
         const pattern = patternInfo?.pattern || settings.pattern;
+        const validate = patternInfo?.validate;
         if (pattern) {
             const matches = [];
             const positions = [];
             let match;
             const regex = new RegExp(pattern.source, pattern.flags);
             while ((match = regex.exec(text)) !== null) {
-                matches.push(match[0]);
-                positions.push({
-                    start: match.index,
-                    end: match.index + match[0].length,
-                    value: match[0]
-                });
+                if (!validate || validate(match[0])) {
+                    matches.push(match[0]);
+                    positions.push({
+                        start: match.index,
+                        end: match.index + match[0].length,
+                        value: match[0]
+                    });
+                }
                 if (!pattern.global)
                     break;
             }

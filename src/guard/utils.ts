@@ -13,6 +13,14 @@ export function unique(arr: string[]) {
   return Array.from(new Set(arr));
 }
 
+/** Length of the longest common prefix of two strings. */
+export function commonPrefixLen(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a[i] === b[i]) i++;
+  return i;
+}
+
 export function clipMatches(matches: string[], max = 8, maxLen = 64) {
   const clipped = matches.slice(0, max).map((m) => (m.length > maxLen ? m.slice(0, maxLen) + "…" : m));
   return clipped;

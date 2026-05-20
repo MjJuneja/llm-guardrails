@@ -7,6 +7,11 @@ export type LLMMessage = {
 
 export type LLMCaller = (messages: LLMMessage[]) => Promise<string>;
 
+/** A streaming LLM call: yields response chunks (token deltas) as they arrive. */
+export type LLMStreamCaller = (
+  messages: LLMMessage[],
+) => AsyncIterable<string>;
+
 export type GuardAction = "ALLOW" | "REDACT" | "BLOCK" | "REWRITE";
 export type GuardPhase = "input" | "output" | "tool" | "compliance";
 export type Severity = "low" | "medium" | "high" | "critical";
@@ -26,6 +31,7 @@ export type GuardEvent = {
     | "OUTPUT_JSON_INVALID"
     | "TOOL_CALL_BLOCKED"
     | "TOOL_RESULT_REDACTED"
+    | "PROMPT_INJECTION_DETECTED"
     // DPDP / India compliance
     | "CHILD_SIGNAL_DETECTED"
     | "DPDP_BLOCKED"
@@ -100,6 +106,9 @@ export type GuardrailsConfig = {
   redactSecrets?: boolean;
   blockSQLLeakage?: boolean;
   blockPromptLeakage?: boolean;
+  // blockPromptInjection: heuristically detect jailbreak / prompt-injection
+  // attempts in input (and RAG context) and block them (default false)
+  blockPromptInjection?: boolean;
 
   // DPDP / India compliance
   // detectChildSignals: heuristically flag content involving minors (default false)
@@ -112,6 +121,10 @@ export type GuardrailsConfig = {
   maxRewriteAttempts?: number; // default 1
   outputMode?: "text" | "json";
   systemGuardPrompt?: string;
+
+  // streaming: chars held back from the live edge so a match spanning a chunk
+  // boundary is caught before emission (default 1024)
+  streamHoldback?: number;
 
   // for json mode
   outputJsonValidator?: OutputJsonValidator;
@@ -175,8 +188,22 @@ export type ValidatePhaseResult = {
   json?: any;
 };
 
+export type GuardrailsStreamInput = {
+  userMessage?: string;
+  context?: string;
+  preMessages?: LLMMessage[];
+  requestId?: string;
+
+  // A streaming LLM call. Receives the guarded messages, yields output chunks.
+  llmStream: LLMStreamCaller;
+};
+
 export type Guardrails = {
   run(input: GuardrailsRunInput): Promise<GuardrailsRunResult>;
+
+  // Streaming variant of run(): yields output chunks that have already been
+  // scanned and redacted. Audit events are delivered through `onEvent`.
+  runStream(input: GuardrailsStreamInput): AsyncGenerator<string>;
 
   // vNext helpers
   validateInput(text: string, requestId?: string): ValidatePhaseResult;

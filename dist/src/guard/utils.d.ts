@@ -2,6 +2,8 @@ import type { GuardEvent } from "./types.js";
 export declare function nowIso(): string;
 export declare function emit(events: GuardEvent[], onEvent: ((e: GuardEvent) => void) | undefined, e: GuardEvent): void;
 export declare function unique(arr: string[]): string[];
+/** Length of the longest common prefix of two strings. */
+export declare function commonPrefixLen(a: string, b: string): number;
 export declare function clipMatches(matches: string[], max?: number, maxLen?: number): string[];
 export declare function applyRedactions(input: string, redactions: Array<{
     start: number;

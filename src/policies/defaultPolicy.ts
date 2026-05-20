@@ -21,6 +21,9 @@ export function defaultInputPolicy(detections: Detection[], cfg: GuardrailsConfi
       const action: GuardAction = cfg.dpdpEnforce ? "BLOCK" : "ALLOW";
       return { ...d, action, severity: "high" as const };
     }
+    if (d.detector === "promptInjection" && cfg.blockPromptInjection) {
+      return { ...d, action: "BLOCK" as const, severity: "high" as const };
+    }
     return d;
   });
 }

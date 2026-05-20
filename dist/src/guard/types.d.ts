@@ -4,6 +4,8 @@ export type LLMMessage = {
     content: string;
 };
 export type LLMCaller = (messages: LLMMessage[]) => Promise<string>;
+/** A streaming LLM call: yields response chunks (token deltas) as they arrive. */
+export type LLMStreamCaller = (messages: LLMMessage[]) => AsyncIterable<string>;
 export type GuardAction = "ALLOW" | "REDACT" | "BLOCK" | "REWRITE";
 export type GuardPhase = "input" | "output" | "tool" | "compliance";
 export type Severity = "low" | "medium" | "high" | "critical";
@@ -11,7 +13,7 @@ export type GuardEvent = {
     ts: string;
     requestId: string;
     phase: GuardPhase;
-    kind: "INPUT_REDACTED" | "INPUT_BLOCKED" | "OUTPUT_REDACTED" | "OUTPUT_BLOCKED" | "OUTPUT_REWRITE_ATTEMPT" | "OUTPUT_REWRITE_SUCCESS" | "OUTPUT_REWRITE_FAILED" | "OUTPUT_JSON_INVALID" | "TOOL_CALL_BLOCKED" | "TOOL_RESULT_REDACTED" | "CHILD_SIGNAL_DETECTED" | "DPDP_BLOCKED" | "CONSENT_RECORDED" | "EVIDENCE_RECORDED";
+    kind: "INPUT_REDACTED" | "INPUT_BLOCKED" | "OUTPUT_REDACTED" | "OUTPUT_BLOCKED" | "OUTPUT_REWRITE_ATTEMPT" | "OUTPUT_REWRITE_SUCCESS" | "OUTPUT_REWRITE_FAILED" | "OUTPUT_JSON_INVALID" | "TOOL_CALL_BLOCKED" | "TOOL_RESULT_REDACTED" | "PROMPT_INJECTION_DETECTED" | "CHILD_SIGNAL_DETECTED" | "DPDP_BLOCKED" | "CONSENT_RECORDED" | "EVIDENCE_RECORDED";
     detector: string;
     severity?: Severity;
     matches?: string[];
@@ -69,11 +71,13 @@ export type GuardrailsConfig = {
     redactSecrets?: boolean;
     blockSQLLeakage?: boolean;
     blockPromptLeakage?: boolean;
+    blockPromptInjection?: boolean;
     detectChildSignals?: boolean;
     dpdpEnforce?: boolean;
     maxRewriteAttempts?: number;
     outputMode?: "text" | "json";
     systemGuardPrompt?: string;
+    streamHoldback?: number;
     outputJsonValidator?: OutputJsonValidator;
     onEvent?: (e: GuardEvent) => void;
     emitOnAllow?: boolean;
@@ -109,8 +113,16 @@ export type ValidatePhaseResult = {
     detections?: unknown;
     json?: any;
 };
+export type GuardrailsStreamInput = {
+    userMessage?: string;
+    context?: string;
+    preMessages?: LLMMessage[];
+    requestId?: string;
+    llmStream: LLMStreamCaller;
+};
 export type Guardrails = {
     run(input: GuardrailsRunInput): Promise<GuardrailsRunResult>;
+    runStream(input: GuardrailsStreamInput): AsyncGenerator<string>;
     validateInput(text: string, requestId?: string): ValidatePhaseResult;
     validateOutput(text: string, requestId?: string): ValidatePhaseResult;
     validateToolCall(call: ToolCall, requestId?: string): ToolCallDecision;

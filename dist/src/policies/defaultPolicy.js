@@ -22,6 +22,9 @@ function defaultInputPolicy(detections, cfg) {
             const action = cfg.dpdpEnforce ? "BLOCK" : "ALLOW";
             return { ...d, action, severity: "high" };
         }
+        if (d.detector === "promptInjection" && cfg.blockPromptInjection) {
+            return { ...d, action: "BLOCK", severity: "high" };
+        }
         return d;
     });
 }
