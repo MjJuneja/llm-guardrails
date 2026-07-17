@@ -254,6 +254,78 @@ const guard = createGuardrails({
 
 ------------------------------------------------------------------------
 
+# Tool Call Guardrails (Advanced Validation & Risk Scoring)
+
+Validate every tool call proposed by an LLM before the tool is executed. The `ToolGuard` class handles rule validation, risk scoring (0-100), allowlisting, denylisting, and supports confirmation actions (`allow` | `block` | `require_confirmation`).
+
+``` ts
+import {
+  ToolGuard,
+  createFilesystemValidator,
+  createSqlValidator,
+  createShellValidator,
+  createHttpValidator,
+  createFinancialValidator
+} from "@mjjuneja/llm-guardrails";
+
+const guard = new ToolGuard({
+  allowlist: ["read_file", "search_db", "http_get"],
+  denylist: ["drop_tables", "sudo_run"]
+});
+
+// Register specialized built-in validators
+guard.registerValidator(
+  createFilesystemValidator({
+    rootDirs: ["/var/data/app/"],
+    allowTraversal: false // Blocks directory traversal (../)
+  }),
+  "read_file"
+);
+
+guard.registerValidator(
+  createSqlValidator({
+    readOnly: true, // Blocks DROP, INSERT, UPDATE, DELETE, ALTER, TRUNCATE, etc.
+    allowlist: ["^INSERT INTO logs"] // Exemption from readOnly block
+  }),
+  "search_db"
+);
+
+guard.registerValidator(
+  createHttpValidator({
+    allowlist: ["*.trustedapi.com"],
+    blockPrivateIPs: true // Blocks localhost, 127.0.0.1, 192.168.x.x, fc00::/7, metadata IPs (169.254.169.254) to prevent SSRF
+  }),
+  "http_get"
+);
+
+// Validate a tool call
+const result = await guard.validate({
+  name: "read_file",
+  args: { filePath: "/var/data/app/config.json" }
+});
+
+console.log(result);
+/*
+{
+  action: "allow",
+  riskScore: 10,
+  matchedRules: [],
+  reason: "Path validated successfully.",
+  validatorName: "filesystem"
+}
+*/
+```
+
+### Built-in Security Validators
+
+*   **Filesystem Validator (`createFilesystemValidator`)**: Blocks directory traversal attacks (`../`) and confines file operations to specific root directories.
+*   **SQL Validator (`createSqlValidator`)**: Prevents destructive actions (`DROP`, `DELETE`, `TRUNCATE`, `ALTER`), multiple stacked commands (separated by `;`), and supports `readOnly` restrict mode with query allowlists.
+*   **Shell Command Validator (`createShellValidator`)**: Blocks dangerous binaries and commands (`sudo`, `rm -rf`, `shutdown`, `reboot`, and pipelines like `curl | bash`).
+*   **HTTP SSRF Validator (`createHttpValidator`)**: Prevents Server-Side Request Forgery (SSRF) by blocking private subnets, localhost, and metadata servers (`169.254.169.254`) by default. Supports glob domain allowlists and denylists.
+*   **Financial Validator (`createFinancialValidator`)**: Enforces transaction limits on transfer/refund/payment amounts with optional currency validation.
+
+------------------------------------------------------------------------
+
 # DPDP / India Compliance
 
 Built-in support for India's Digital Personal Data Protection (DPDP) Act:
